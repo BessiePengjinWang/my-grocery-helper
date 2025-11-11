@@ -1,0 +1,452 @@
+{
+  "name": "My Grocery Helper",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {
+          "download": true
+        }
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        112
+      ],
+      "id": "b94e77c1-df85-4298-87a2-d6712171deab",
+      "name": "Telegram Trigger",
+      "webhookId": "c1b67c53-7c7d-493f-9c9a-1d86e11b4176",
+      "credentials": {
+        "telegramApi": {
+          "id": "LJfZKhHnl2gO8FnK",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "27cc2768-fda5-4a1c-a94e-27a2fea3a007",
+              "leftValue": "={{ $json.message.photo && $json.message.photo.length > 0 }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        208,
+        112
+      ],
+      "id": "90ee7437-a720-4e05-8ad8-6dba43345252",
+      "name": "Check Message Type"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "analyze",
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list",
+          "cachedResultName": "GPT-4O"
+        },
+        "text": "这是一张购物小票。请提取所有商品信息，返回JSON格式。\n\n要求：\n1. 返回一个数组，每个商品是一个对象\n2. 包含字段：name（商品名）, price（价格，数字类型）\n3. 只提取商品，忽略小计、税、总计等\n4. 如果价格看不清，用null\n\n示例输出：\n[\n  {\"name\": \"Organic Milk\", \"price\": 4.99},\n  {\"name\": \"Eggs\", \"price\": 3.49}\n]\n\n只返回JSON数组，不要其他文字。",
+        "inputType": "base64",
+        "options": {
+          "detail": "high",
+          "maxTokens": 2000
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [
+        464,
+        -16
+      ],
+      "id": "b8b60bc9-15db-49c1-8c09-c003a87c813a",
+      "name": "Analyze Receipt",
+      "credentials": {
+        "openAiApi": {
+          "id": "SmQB76mmH8cEGmaS",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1) 取输入\nconst data = $input.first().json;\n\n// 2) 提取文本：兼容多种结构\nfunction pickText(d) {\n  if (!d) return '';\n\n  // Analyze Image 常见：[[{ content: [{ text }] }]]\n  if (Array.isArray(d) && Array.isArray(d[0]) && d[0][0]?.content?.[0]?.text) {\n    return d[0][0].content[0].text;\n  }\n  // 另一种：[{ content: [{ text }] }]\n  if (Array.isArray(d) && d[0]?.content?.[0]?.text) {\n    return d[0].content[0].text;\n  }\n  // 对象：{ content: [{ text }] }\n  if (d.content?.[0]?.text) return d.content[0].text;\n\n  // 新版常见：{ text }\n  if (typeof d.text === 'string') return d.text;\n\n  // 旧版：{ choices[0].message.content }\n  if (d.choices?.[0]?.message?.content) return d.choices[0].message.content;\n\n  // 兜底：在对象里递归找第一个像 JSON 的 'text' 字段\n  function findTextDeep(obj) {\n    if (!obj || typeof obj !== 'object') return '';\n    for (const k of Object.keys(obj)) {\n      const v = obj[k];\n      if (typeof v === 'string' && /[\\[\\{].*[\\]\\}]/s.test(v)) return v;\n      if (Array.isArray(v)) {\n        for (const it of v) {\n          const got = findTextDeep(it);\n          if (got) return got;\n        }\n      } else if (typeof v === 'object') {\n        const got = findTextDeep(v);\n        if (got) return got;\n      }\n    }\n    return '';\n  }\n  return findTextDeep(d);\n}\n\nlet rawText = pickText(data);\nif (!rawText) {\n  return [{\n    json: {\n      error: '未找到可解析的文本输出，请检查上游节点输出结构',\n      keysAtTopLevel: Object.keys(data || {}),\n      hint: '确保 Code 节点直接连接在 Analyze Image 的输出之后；在 Analyze Image 的 Output 面板确认 content[0].text 是否存在'\n    }\n  }];\n}\n\n// 3) 去掉 ```json ... ``` 包裹，只取代码块内部优先\nconst fenced = rawText.match(/```(?:json)?\\s*([\\s\\S]*?)```/i);\nlet body = fenced ? fenced[1] : rawText;\n\n// 4) 只截取最外层数组内容（防止前后多余文字）\nconst start = body.indexOf('[');\nconst end = body.lastIndexOf(']');\nif (start !== -1 && end !== -1 && end > start) {\n  body = body.slice(start, end + 1);\n}\nbody = body.trim();\n\n// 5) 解析 JSON，失败则返回诊断信息\nlet items;\ntry {\n  items = JSON.parse(body);\n} catch (e) {\n  return [{\n    json: {\n      error: 'JSON解析失败',\n      message: e.message,\n      preview: body.slice(0, 500)\n    }\n  }];\n}\n\nif (!Array.isArray(items)) {\n  return [{ json: { error: '解析结果不是数组', previewType: typeof items } }];\n}\n\n// 6) 组装输出\nconst today = new Date().toISOString().split('T')[0];\nconst skip = new Set(['Bottle Deposit', 'SUBTOTAL', 'TAX', 'TOTAL']);\n\nreturn items\n  .filter(it => it && typeof it === 'object' && !skip.has(it.name))\n  .map(it => ({\n    json: {\n      date: today,\n      name: it.name ?? null,\n      price: (it.price ?? null)\n    }\n  }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        -16
+      ],
+      "id": "e036be05-edf5-4d2d-8a30-b383c75b4d7a",
+      "name": "Parse Receipt JSON"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1b6W0CCODNzvMtm7bWcpMQK85TpGPoeYvBCC0o-sAWAo",
+          "mode": "list",
+          "cachedResultName": "购物记录",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1b6W0CCODNzvMtm7bWcpMQK85TpGPoeYvBCC0o-sAWAo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1b6W0CCODNzvMtm7bWcpMQK85TpGPoeYvBCC0o-sAWAo/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "price",
+              "displayName": "price",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        880,
+        -16
+      ],
+      "id": "fc538c99-7965-45b7-a629-f9f5b9e24bc1",
+      "name": "Save to Google Sheets",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ipx8U0kbhaXbpAYn",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1b6W0CCODNzvMtm7bWcpMQK85TpGPoeYvBCC0o-sAWAo",
+          "mode": "list",
+          "cachedResultName": "购物记录",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1b6W0CCODNzvMtm7bWcpMQK85TpGPoeYvBCC0o-sAWAo/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1b6W0CCODNzvMtm7bWcpMQK85TpGPoeYvBCC0o-sAWAo/edit#gid=0"
+        },
+        "options": {
+          "dataLocationOnSheet": {
+            "values": {
+              "rangeDefinition": "detectAutomatically"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        464,
+        240
+      ],
+      "id": "bd782006-2539-4b09-a2ed-ed4079bdac2d",
+      "name": "Read Purchase History",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ipx8U0kbhaXbpAYn",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "GPT-5"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "=这是我最近买的东西：\n{{ JSON.stringify($json.items.slice(0, 5), null, 2) }}\n\n请从中选5-10个你觉得我下周可能需要再买的商品，返回JSON格式：\n\n[\n  {\"name\": \"商品名\", \"reason\": \"理由（少于等于10个汉字）\"}\n]"
+            },
+            {
+              "role": "system",
+              "content": "你是一个购物分析助手。你的任务是根据用户的购物历史推荐下周可能需要购买的商品。\n你必须返回至少5个推荐，即使数据不完美。\n永远只输出JSON数组，不要任何解释或markdown格式。"
+            }
+          ]
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 3000
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2,
+      "position": [
+        848,
+        240
+      ],
+      "id": "7b2edd68-37a7-4ec3-a036-74022c2c6232",
+      "name": "Recommend Items",
+      "executeOnce": true,
+      "credentials": {
+        "openAiApi": {
+          "id": "SmQB76mmH8cEGmaS",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 获取模型的输出\nconst modelOutput = $input.first().json;\n\n// 提取内部文本\nconst rawText = modelOutput?.output?.[0]?.content?.[0]?.text;\n\nif (!rawText) {\n  return [{ json: { error: \"未找到模型输出文本\", raw: modelOutput } }];\n}\n\n// 清理格式（去掉markdown包裹等）\nlet clean = rawText.replace(/```json|```/g, '').trim();\n\n// 尝试解析JSON\nlet items;\ntry {\n  items = JSON.parse(clean);\n} catch (e) {\n  return [{ json: { error: \"JSON解析失败\", clean, message: e.message } }];\n}\n\n// 🧩 拼接成一条 Telegram 文本\nconst messageText = items\n  .map((item, i) => `#${i + 1} 🛒 *${item.name}*\\n原因: ${item.reason}`)\n  .join('\\n\\n');\n\n// ✅ 输出单条 item，方便 Telegram 直接使用\nreturn [{\n  json: {\n    message: messageText\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1152,
+        240
+      ],
+      "id": "c80f3c00-0c7c-4112-8274-39d4f2e5f9d9",
+      "name": "Parse Recommendation"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').first().json.message.chat.id }}",
+        "text": "=本周购物推荐：\n{{ $json.message }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1344,
+        240
+      ],
+      "id": "bd67a7ce-e863-4dbb-a14f-b20c977673e5",
+      "name": "Send Recommendation",
+      "webhookId": "eb64b23c-61f0-4d4d-8800-53f98d2feffc",
+      "credentials": {
+        "telegramApi": {
+          "id": "LJfZKhHnl2gO8FnK",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "=✅ 小票已处理！     记录了 {{ $('Parse Receipt JSON').all().length }} 件商品    总计：${{ $('Parse Receipt JSON').all().reduce((sum, item) => sum + (item.json.price || 0), 0).toFixed(2) }}     已保存到Google Sheets 📊",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1088,
+        -16
+      ],
+      "id": "8e6b8f40-6205-4c5e-8d9b-8a3f38388c5e",
+      "name": "Confirm Save",
+      "webhookId": "7d947d21-a45d-4685-ac82-ed1c901cb587",
+      "executeOnce": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "LJfZKhHnl2gO8FnK",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allItems = $input.all().map(item => item.json);\n\n// 按商品分组\nconst itemStats = {};\n\nallItems.forEach(item => {\n  const name = item.name;\n  if (!itemStats[name]) {\n    itemStats[name] = {\n      name: name,\n      prices: [],\n      dates: []\n    };\n  }\n  itemStats[name].prices.push(item.price || 0);\n  itemStats[name].dates.push(item.date);\n});\n\n// 计算基础统计\nconst results = Object.values(itemStats).map(item => {\n  // 排序日期\n  const sortedDates = item.dates.sort();\n  \n  // 计算间隔（如果买过多次）\n  let intervals = [];\n  if (sortedDates.length > 1) {\n    for (let i = 1; i < sortedDates.length; i++) {\n      const days = (new Date(sortedDates[i]) - new Date(sortedDates[i-1])) / (1000 * 60 * 60 * 24);\n      intervals.push(days);\n    }\n  }\n  \n  // 距今天数\n  const lastDate = new Date(sortedDates[sortedDates.length - 1]);\n  const today = new Date();\n  const daysSince = Math.floor((today - lastDate) / (1000 * 60 * 60 * 24));\n  \n  return {\n    name: item.name,\n    purchaseCount: sortedDates.length,\n    purchaseDates: sortedDates,\n    avgPrice: (item.prices.reduce((a,b) => a+b, 0) / item.prices.length).toFixed(2),\n    daysSinceLastPurchase: daysSince,\n    avgIntervalDays: intervals.length > 0 ? Math.round(intervals.reduce((a,b) => a+b) / intervals.length) : null,\n    allIntervals: intervals\n  };\n});\n\n// 按购买频率排序（常买的在前）\nresults.sort((a, b) => b.purchaseCount - a.purchaseCount);\n\nreturn [{\n  json: {\n    items: results,\n    totalUniqueItems: results.length,\n    analysisDate: new Date().toISOString().split('T')[0]\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        240
+      ],
+      "id": "87c593f2-0bce-447d-95df-1d46a32b9a8a",
+      "name": "Parse Purchase History"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check Message Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Message Type": {
+      "main": [
+        [
+          {
+            "node": "Analyze Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Purchase History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Receipt": {
+      "main": [
+        [
+          {
+            "node": "Parse Receipt JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Receipt JSON": {
+      "main": [
+        [
+          {
+            "node": "Save to Google Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to Google Sheets": {
+      "main": [
+        [
+          {
+            "node": "Confirm Save",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Purchase History": {
+      "main": [
+        [
+          {
+            "node": "Parse Purchase History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recommend Items": {
+      "main": [
+        [
+          {
+            "node": "Parse Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Recommendation": {
+      "main": [
+        [
+          {
+            "node": "Send Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Purchase History": {
+      "main": [
+        [
+          {
+            "node": "Recommend Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "a0b78bdf-5ed3-4d54-9046-b71d6c65d49c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "ac16e6d9ad301564e0715617d5d1ccec1e5a506281b26e69b95d5511ec79ee54"
+  },
+  "id": "WcAxdEIldutlTi8c",
+  "tags": []
+}
